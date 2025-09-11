@@ -1,4 +1,5 @@
 terraform*
+!terraform-registry-manifest.json
 main.tf
 .terraform
 .terraform.lock.hcl
