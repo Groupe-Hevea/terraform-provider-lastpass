@@ -1,3 +1,5 @@
+version: 2
+
 builds:
 - env:
     - CGO_ENABLED=0
@@ -14,26 +16,32 @@ builds:
   goarch:
     - amd64
     - arm64
+  ignore:
+    - goos: darwin
+      goarch: 386
   binary: '{{ .ProjectName }}_v{{ .Version }}'
+
 archives:
-- format: zip
-  name_template: '{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}'
+- name_template: '{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}'
 checksum:
   name_template: '{{ .ProjectName }}_{{ .Version }}_SHA256SUMS'
   algorithm: sha256
-signs:
-  - artifacts: checksum
-    args:
-      - "--batch"
-      - "--local-user"
-      - "{{ .Env.GPG_FINGERPRINT }}"
-      - "--output"
-      - "${signature}"
-      - "--detach-sign"
-      - "${artifact}"
+# GPG signing removed for GitHub Actions compatibility
+release:
+  github:
+    owner: Groupe-Hevea
+    name: terraform-provider-lastpass
+  draft: false
+  prerelease: auto
+
 changelog:
+  sort: asc
   filters:
     exclude:
-      - '^docs'
-      - '^readme'
-      - typo
+      - '^docs:'
+      - '^test:'
+      - '^ci:'
+      - Merge pull request
+      - Merge branch
+      - go mod tidy
+      - '^build:'
