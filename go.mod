@@ -1,4 +1,4 @@
-module github.com/nrkno/terraform-provider-lastpass
+module github.com/Groupe-Hevea/terraform-provider-lastpass
 
 go 1.16
 

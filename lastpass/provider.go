@@ -5,7 +5,7 @@ import (
 
 	"github.com/hashicorp/terraform-plugin-sdk/v2/diag"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
-	"github.com/nrkno/terraform-provider-lastpass/api"
+	"github.com/Groupe-Hevea/terraform-provider-lastpass/api"
 )
 
 // Provider config
@@ -26,15 +26,15 @@ func Provider() *schema.Provider {
 		Schema: map[string]*schema.Schema{
 			"username": {
 				Type:        schema.TypeString,
-				Required:    true,
-				Description: "Lastpass login e-mail",
+				Optional:    true,
+				Description: "Lastpass login e-mail (Only needed if provider is really used)",
 				DefaultFunc: schema.EnvDefaultFunc("LASTPASS_USER", nil),
 			},
 			"password": {
 				Type:        schema.TypeString,
-				Required:    true,
+				Optional:    true,
 				Sensitive:   true,
-				Description: "Lastpass login password",
+				Description: "Lastpass login password (Only needed if provider is really used)",
 				DefaultFunc: schema.EnvDefaultFunc("LASTPASS_PASSWORD", nil),
 			},
 		},
@@ -44,9 +44,17 @@ func Provider() *schema.Provider {
 
 func providerConfigure(ctx context.Context, d *schema.ResourceData) (interface{}, diag.Diagnostics) {
 	var diags diag.Diagnostics
+
+	username := d.Get("username").(string)
+	password := d.Get("password").(string)
+
+	credentialsProvided := username != "" && password != ""
+
 	client := api.Client{
-		Username: d.Get("username").(string),
-		Password: d.Get("password").(string),
+		Username:            username,
+		Password:            password,
+		CredentialsProvided: credentialsProvided,
 	}
+
 	return &client, diags
 }

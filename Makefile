@@ -1,6 +1,6 @@
 TEST?=$$(go list ./... | grep -v 'vendor')
 HOSTNAME=registry.terraform.io
-NAMESPACE=nrkno
+NAMESPACE=Groupe-Hevea
 NAME=lastpass
 BINARY=terraform-provider-${NAME}
 VERSION=0.6.0
@@ -26,13 +26,12 @@ release:
 	GOOS=windows GOARCH=386 go build -o ./bin/${BINARY}_${VERSION}_windows_386
 	GOOS=windows GOARCH=amd64 go build -o ./bin/${BINARY}_${VERSION}_windows_amd64
 
-install: build
-	mkdir -p ~/.terraform.d/plugins/${HOSTNAME}/${NAMESPACE}/${NAME}/${VERSION}/${OS_ARCH}
-	mv ${BINARY} ~/.terraform.d/plugins/${HOSTNAME}/${NAMESPACE}/${NAME}/${VERSION}/${OS_ARCH}
+install:
+	go install -trimpath -ldflags "-s -w -X github.com/Groupe-Hevea/terraform-provider-lastpass/lastpass.version=dev -X github.com/Groupe-Hevea/terraform-provider-lastpass/lastpass.commit=`git describe --always --abbrev=8 --dirty`" .
 
-test: 
+test:
 	go test $(TEST) || exit 1
 	echo $(TEST) | xargs -t -n4 go test $(TESTARGS) -timeout=30s -parallel=4
 
-testacc: 
+testacc:
 	TF_ACC=1 go test $(TEST) -v $(TESTARGS) -timeout 120m

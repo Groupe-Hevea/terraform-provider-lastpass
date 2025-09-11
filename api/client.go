@@ -28,8 +28,9 @@ type Secret struct {
 
 // Client is our Lastpass (lpass) wrapper client.
 type Client struct {
-	Username string
-	Password string
+	Username            string
+	Password            string
+	CredentialsProvided bool
 }
 
 func (s *Secret) genCustomFields() {
@@ -58,7 +59,7 @@ func (s *Secret) genCustomFields() {
 func (s *Secret) getTemplate() string {
 	template := fmt.Sprintf(`Name: %s
 URL: %s
-Username: %s 
+Username: %s
 Password: %s
 Notes:    # Add notes below this line.
 %s
@@ -67,13 +68,13 @@ Notes:    # Add notes below this line.
 }
 
 func (c *Client) login() error {
+	if !c.CredentialsProvided {
+		return errors.New("LastPass provider not configured. Please provide username and password (eg: environment variables LASTPASS_USER and LASTPASS_PASSWORD)")
+	}
+
 	cmd := exec.Command("lpass", "status", "-q")
 	err := cmd.Run()
 	if err != nil {
-		if c.Username == "" {
-			err := errors.New("Not logged in, please run 'lpass login' manually and try again")
-			return err
-		}
 		cmd := exec.Command("lpass", "login", c.Username)
 		var inbuf, errbuf bytes.Buffer
 		cmd.Env = os.Environ()
