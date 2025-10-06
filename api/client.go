@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"regexp"
 	"strings"
+	"sync"
 )
 
 // Secret describes a Lastpass object.
@@ -31,6 +32,8 @@ type Client struct {
 	Username            string
 	Password            string
 	CredentialsProvided bool
+	loginMutex          sync.Mutex
+	loggedIn            bool
 }
 
 func (s *Secret) genCustomFields() {
@@ -68,6 +71,13 @@ Notes:    # Add notes below this line.
 }
 
 func (c *Client) login() error {
+	c.loginMutex.Lock()
+	defer c.loginMutex.Unlock()
+
+	if c.loggedIn {
+		return nil
+	}
+
 	if !c.CredentialsProvided {
 		return errors.New("LastPass provider not configured. Please provide username and password (eg: environment variables LASTPASS_USER and LASTPASS_PASSWORD)")
 	}
@@ -88,5 +98,7 @@ func (c *Client) login() error {
 			return err
 		}
 	}
+
+	c.loggedIn = true
 	return nil
 }
