@@ -34,6 +34,16 @@ func vault(t *testing.T, client *lastpass.Client) *lastpass.Vault {
 	return v
 }
 
+// entry returns the entry id, which must exist and be readable.
+func entry(t *testing.T, v *lastpass.Vault, id string) lastpass.Account {
+	t.Helper()
+	account, err := v.Account(id)
+	if err != nil || account == nil {
+		t.Fatalf("entry %s: %v, %v", id, account, err)
+	}
+	return *account
+}
+
 func TestLoginFollowsTheIterationCountOfTheAccount(t *testing.T) {
 	server := lastpasstest.New(t, username, password)
 	login(t, server)
@@ -53,20 +63,15 @@ func TestLoginFollowsTheIterationCountOfTheAccount(t *testing.T) {
 func TestLoginRefused(t *testing.T) {
 	server := lastpasstest.New(t, username, password)
 	_, err := lastpass.Login(context.Background(), username, "wrong", lastpass.WithBaseURL(server.URL))
-
-	var authErr *lastpass.AuthenticationError
-	if !errors.As(err, &authErr) {
-		t.Fatalf("got %v, want an AuthenticationError", err)
-	}
-	if authErr.Cause != "unknownpassword" {
-		t.Errorf("cause = %q, want unknownpassword", authErr.Cause)
+	if err == nil || !strings.Contains(err.Error(), "login refused (unknownpassword): Invalid Password!") {
+		t.Errorf("got %v, want the refusal and its cause", err)
 	}
 }
 
 func TestVaultListsPersonalAndSharedEntries(t *testing.T) {
 	server := lastpasstest.New(t, username, password)
 	server.AddShare(shared, false)
-	personal := server.Put(lastpass.Account{Name: "personal", Username: "me", Password: "pw", URL: "https://example.com", Notes: "été\nhiver"})
+	personal := server.Put(lastpass.Account{Name: "personal", Username: "me", Password: "pw", URL: "https://example.com", Notes: "été\nhiver", Reprompt: true})
 	inShare := server.Put(lastpass.Account{Share: shared, Group: "aws/keys", Name: "key", Password: "secret"})
 	server.Put(lastpass.Account{Share: shared, Group: "aws", URL: "http://group"})
 	note := server.Put(lastpass.Account{Share: shared, Name: "note", URL: "http://sn", Notes: "NoteType:Server\nHostname:h"})
@@ -76,27 +81,63 @@ func TestVaultListsPersonalAndSharedEntries(t *testing.T) {
 	if len(v.Accounts) != 3 {
 		t.Fatalf("got %d entries, want 3 (the folder placeholder is skipped)", len(v.Accounts))
 	}
-	if got := v.Account(personal); got == nil || got.Share != "" || got.Username != "me" || got.URL != "https://example.com" || got.Notes != "été\nhiver" {
+	if got := entry(t, v, personal); got.Share != "" || got.Username != "me" || got.Password != "pw" || got.URL != "https://example.com" ||
+		got.Notes != "été\nhiver" || !got.Reprompt || got.LastTouch == "" || got.LastModifiedGMT == "" {
 		t.Errorf("personal entry = %+v", got)
 	}
-	if got := v.Account(inShare); got == nil || got.Share != shared || got.Group != "aws/keys" || got.Name != "key" || got.Password != "secret" {
+	if got := entry(t, v, inShare); got.Share != shared || got.Group != "aws/keys" || got.Name != "key" || got.Password != "secret" || got.Reprompt {
 		t.Errorf("shared entry = %+v", got)
 	}
-	if got := v.Account(note); got == nil || got.URL != "http://sn" || got.Notes != "NoteType:Server\nHostname:h" {
+	if got := entry(t, v, note); got.URL != "http://sn" || got.Notes != "NoteType:Server\nHostname:h" {
 		t.Errorf("secure note = %+v", got)
 	}
-	if v.Account("424242") != nil {
-		t.Error("an unknown ID returned an entry")
+	if account, err := v.Account("424242"); account != nil || err != nil {
+		t.Errorf("unknown ID: got %v, %v", account, err)
 	}
 }
 
-func TestVaultReadsHexEncodedURLs(t *testing.T) {
-	server := lastpasstest.New(t, username, password)
-	server.URLEncryption = false
-	id := server.Put(lastpass.Account{Name: "old", URL: "https://example.com"})
+// A shared folder nobody opened yet needs the account's private key, which
+// LastPass serves in one of two serializations.
+func TestVaultOpensSharedFoldersWithThePrivateKey(t *testing.T) {
+	for name, legacy := range map[string]bool{"current serialization": false, "original serialization": true} {
+		t.Run(name, func(t *testing.T) {
+			server := lastpasstest.New(t, username, password)
+			server.LegacyPrivateKey = legacy
+			server.AddUnopenedShare(shared)
+			id := server.Put(lastpass.Account{Share: shared, Name: "key", Password: "secret"})
 
-	if got := vault(t, login(t, server)).Account(id); got == nil || got.URL != "https://example.com" {
-		t.Errorf("entry = %+v", got)
+			if got := entry(t, vault(t, login(t, server)), id); got.Share != shared || got.Password != "secret" {
+				t.Errorf("entry = %+v", got)
+			}
+		})
+	}
+}
+
+// One broken entry must not take the whole vault down: it fails when asked for.
+func TestUnreadableEntryDoesNotBreakTheOthers(t *testing.T) {
+	server := lastpasstest.New(t, username, password)
+	good := server.Put(lastpass.Account{Name: "good", Password: "pw"})
+	broken := server.Put(lastpass.Account{Name: "broken", Password: "pw"})
+	server.Corrupt(broken)
+
+	v := vault(t, login(t, server))
+
+	if got := entry(t, v, good); got.Password != "pw" {
+		t.Errorf("good entry = %+v", got)
+	}
+	if account, err := v.Account(broken); account != nil || err == nil || !strings.Contains(err.Error(), "cannot be read") {
+		t.Errorf("broken entry: got %v, %v, want an error", account, err)
+	}
+}
+
+// A vault cut short would otherwise read as a vault with entries deleted.
+func TestTruncatedVaultIsAnError(t *testing.T) {
+	server := lastpasstest.New(t, username, password)
+	server.Put(lastpass.Account{Name: "entry"})
+	server.Truncated = true
+
+	if _, err := login(t, server).Vault(context.Background()); err == nil || !strings.Contains(err.Error(), "truncated") {
+		t.Errorf("got %v, want a truncation error", err)
 	}
 }
 
@@ -106,33 +147,35 @@ func TestAddUpdateDelete(t *testing.T) {
 	server.AddShare(shared, false)
 	client := login(t, server)
 
-	account := &lastpass.Account{Share: shared, Group: "tfstates", Name: "key", Username: "AKIA", Password: "s3cr3t", URL: "https://aws.example", Notes: "line one\nline two"}
-	if err := client.Add(ctx, vault(t, client), account); err != nil {
+	account := lastpass.Account{Share: shared, Group: "tfstates", Name: "key", Username: "AKIA", Password: "s3cr3t", URL: "https://aws.example", Notes: "line one\nline two"}
+	id, err := client.Add(ctx, vault(t, client), account)
+	if err != nil {
 		t.Fatalf("add: %v", err)
 	}
-	if account.ID == "" || account.ID == "0" {
-		t.Fatalf("add did not set the ID: %q", account.ID)
-	}
-	stored := vault(t, client).Account(account.ID)
-	if stored == nil || stored.Share != shared || stored.Group != "tfstates" || stored.Name != "key" || stored.Username != "AKIA" ||
-		stored.Password != "s3cr3t" || stored.URL != "https://aws.example" || stored.Notes != "line one\nline two" {
-		t.Fatalf("stored entry = %+v", stored)
+	stored := entry(t, vault(t, client), id)
+	account.ID, account.LastTouch, account.LastModifiedGMT = id, stored.LastTouch, stored.LastModifiedGMT
+	if stored != account {
+		t.Fatalf("stored entry = %+v, want %+v", stored, account)
 	}
 
-	account.Password = "rotated"
+	account.Password, account.Reprompt = "rotated", true
 	if err := client.Update(ctx, vault(t, client), account); err != nil {
 		t.Fatalf("update: %v", err)
 	}
-	updated := vault(t, client).Account(account.ID)
-	if updated.Password != "rotated" || updated.LastModifiedGMT == stored.LastModifiedGMT {
-		t.Errorf("updated entry = %+v", updated)
+	updated := entry(t, vault(t, client), id)
+	if updated.LastModifiedGMT == stored.LastModifiedGMT {
+		t.Error("update did not change the modification time")
+	}
+	account.LastModifiedGMT = updated.LastModifiedGMT
+	if updated != account {
+		t.Errorf("updated entry = %+v, want %+v", updated, account)
 	}
 
 	if err := client.Delete(ctx, vault(t, client), account); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
-	if vault(t, client).Account(account.ID) != nil {
-		t.Error("entry still present after delete")
+	if got, err := vault(t, client).Account(id); got != nil || err != nil {
+		t.Errorf("after delete: got %v, %v", got, err)
 	}
 
 	if err := client.Update(ctx, vault(t, client), account); !errors.Is(err, lastpass.ErrAccountNotFound) {
@@ -163,8 +206,8 @@ func TestURLEncodingFollowsTheAccountFlag(t *testing.T) {
 			server.URLEncryption = test.urlEncryption
 			client := login(t, server)
 
-			account := &lastpass.Account{Name: "entry", URL: test.url}
-			if err := client.Add(ctx, vault(t, client), account); err != nil {
+			id, err := client.Add(ctx, vault(t, client), lastpass.Account{Name: "entry", URL: test.url})
+			if err != nil {
 				t.Fatalf("add: %v", err)
 			}
 			writes := server.Requests("/show_website.php")
@@ -172,7 +215,7 @@ func TestURLEncodingFollowsTheAccountFlag(t *testing.T) {
 			if got := strings.HasPrefix(sent, "!"); got != test.wantEncrypted {
 				t.Errorf("url sent as %q, want encrypted = %t", sent, test.wantEncrypted)
 			}
-			if got := vault(t, client).Account(account.ID); got == nil || got.URL != test.url {
+			if got := entry(t, vault(t, client), id); got.URL != test.url {
 				t.Errorf("stored entry = %+v", got)
 			}
 		})
@@ -183,13 +226,21 @@ func TestWritesToSharedFoldersAreChecked(t *testing.T) {
 	ctx := context.Background()
 	server := lastpasstest.New(t, username, password)
 	server.AddShare("Shared-ReadOnly", true)
+	existing := server.Put(lastpass.Account{Share: "Shared-ReadOnly", Name: "existing"})
 	client := login(t, server)
 	v := vault(t, client)
+	inReadOnly := lastpass.Account{ID: existing, Share: "Shared-ReadOnly", Name: "existing"}
 
-	if err := client.Add(ctx, v, &lastpass.Account{Share: "Shared-ReadOnly", Name: "x"}); err == nil || !strings.Contains(err.Error(), "read-only") {
+	if _, err := client.Add(ctx, v, lastpass.Account{Share: "Shared-ReadOnly", Name: "x"}); err == nil || !strings.Contains(err.Error(), "read-only") {
 		t.Errorf("add to a read-only folder: got %v", err)
 	}
-	if err := client.Add(ctx, v, &lastpass.Account{Share: "Shared-Missing", Name: "x"}); err == nil || !strings.Contains(err.Error(), "not found") {
+	if err := client.Update(ctx, v, inReadOnly); err == nil || !strings.Contains(err.Error(), "read-only") {
+		t.Errorf("update in a read-only folder: got %v", err)
+	}
+	if err := client.Delete(ctx, v, inReadOnly); err == nil || !strings.Contains(err.Error(), "read-only") {
+		t.Errorf("delete in a read-only folder: got %v", err)
+	}
+	if _, err := client.Add(ctx, v, lastpass.Account{Share: "Shared-Missing", Name: "x"}); err == nil || !strings.Contains(err.Error(), "not found") {
 		t.Errorf("add to an unknown folder: got %v", err)
 	}
 	if len(server.Requests("/show_website.php")) != 0 {

@@ -79,8 +79,8 @@ func customFields(note string) map[string]string {
 			fields[key] = value
 		}
 	}
-	if parts := strings.Split(note, "\nNotes:"); len(parts) == 2 {
-		fields["Notes"] = parts[1]
+	if _, text, found := strings.Cut(note, "\nNotes:"); found {
+		fields["Notes"] = text
 	}
 	return fields
 }

@@ -21,9 +21,15 @@ resource "lastpass_secret" "mysecret" {
 * `username` - (Optional)
 * `password` - (Optional)
 * `url` - (Optional)
-* `note` - (Optional) LastPass stores the note without trailing newline: a note that differs from the stored one only by trailing newlines is not a change.
+* `note` - (Optional) The provider stores the note without trailing newlines: a note that differs from the stored one only by trailing newlines is not a change.
 
-An optional argument left out of the configuration keeps the value LastPass holds.
+An optional argument that is left out, or set to an empty string, keeps the value the entry already has.
+
+## Existing entries
+
+LastPass accepts several entries with the same name. If an entry already has the `name` being created, the resource adopts it: the entry is updated with the configured arguments, keeps the others, and is managed from then on. A warning says so. This also makes it safe to run `apply` again after a creation that failed half-way.
+
+If several entries already share that name, the creation fails and lists their IDs: delete the extra ones, or import the right one.
 
 ## Attribute Reference
 
@@ -35,7 +41,7 @@ An optional argument left out of the configuration keeps the value LastPass hold
 
 ## Importer
 
-Import a pre-existing secret in Lastpass. Example:
+Import a pre-existing secret in LastPass. Example:
 
 ```
 terraform import lastpass_secret.mysecret 4252909269944373577

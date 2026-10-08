@@ -18,17 +18,8 @@ type secretDataSource struct {
 }
 
 type secretDataSourceModel struct {
-	ID              types.String `tfsdk:"id"`
-	Name            types.String `tfsdk:"name"`
-	Fullname        types.String `tfsdk:"fullname"`
-	Username        types.String `tfsdk:"username"`
-	Password        types.String `tfsdk:"password"`
-	LastModifiedGMT types.String `tfsdk:"last_modified_gmt"`
-	LastTouch       types.String `tfsdk:"last_touch"`
-	Group           types.String `tfsdk:"group"`
-	URL             types.String `tfsdk:"url"`
-	Note            types.String `tfsdk:"note"`
-	CustomFields    types.Map    `tfsdk:"custom_fields"`
+	secretModel
+	CustomFields types.Map `tfsdk:"custom_fields"`
 }
 
 func newSecretDataSource() datasource.DataSource {
@@ -55,7 +46,7 @@ func (d *secretDataSource) Schema(_ context.Context, _ datasource.SchemaRequest,
 			"last_touch":        schema.StringAttribute{Computed: true, Description: "Last access, in seconds since the epoch."},
 			"group":             schema.StringAttribute{Computed: true, Description: "Folder of the entry inside its shared folder."},
 			"url":               schema.StringAttribute{Computed: true},
-			"note":              schema.StringAttribute{Computed: true, Sensitive: true},
+			"note":              schema.StringAttribute{Computed: true, Sensitive: true, Description: "A multi-line note is returned with a final newline."},
 			"custom_fields": schema.MapAttribute{
 				ElementType: types.StringType,
 				Computed:    true,
@@ -81,8 +72,7 @@ func (d *secretDataSource) Read(ctx context.Context, req datasource.ReadRequest,
 		return
 	}
 	id := config.ID.ValueString()
-	if !isLastPassID(id) {
-		resp.Diagnostics.AddError("Not a valid LastPass ID", "The ID of a LastPass entry is a number, got: "+id)
+	if !validID(id, &resp.Diagnostics) {
 		return
 	}
 	account, err := d.vault.get(ctx, id)
@@ -98,17 +88,5 @@ func (d *secretDataSource) Read(ctx context.Context, req datasource.ReadRequest,
 	secret := modelFromAccount(account, types.StringNull())
 	fields, diags := types.MapValueFrom(ctx, types.StringType, customFields(secret.Note.ValueString()))
 	resp.Diagnostics.Append(diags...)
-	resp.Diagnostics.Append(resp.State.Set(ctx, secretDataSourceModel{
-		ID:              secret.ID,
-		Name:            secret.Name,
-		Fullname:        secret.Fullname,
-		Username:        secret.Username,
-		Password:        secret.Password,
-		LastModifiedGMT: secret.LastModifiedGMT,
-		LastTouch:       secret.LastTouch,
-		Group:           secret.Group,
-		URL:             secret.URL,
-		Note:            secret.Note,
-		CustomFields:    fields,
-	})...)
+	resp.Diagnostics.Append(resp.State.Set(ctx, secretDataSourceModel{secretModel: secret, CustomFields: fields})...)
 }

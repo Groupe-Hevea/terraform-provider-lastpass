@@ -7,6 +7,7 @@ import (
 	"os"
 
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
+	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/provider"
 	"github.com/hashicorp/terraform-plugin-framework/provider/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
@@ -61,6 +62,17 @@ func (p *lastpassProvider) Configure(ctx context.Context, req provider.Configure
 	if resp.Diagnostics.HasError() {
 		return
 	}
+	// A credential computed from a resource that does not exist yet must not
+	// silently fall back to the environment, which may name another account.
+	for name, value := range map[string]types.String{"username": config.Username, "password": config.Password} {
+		if value.IsUnknown() {
+			resp.Diagnostics.AddAttributeError(path.Root(name), "Unknown LastPass "+name,
+				"The provider cannot log in with a value that is only known after apply. Use a value known at plan time, or the environment variables.")
+		}
+	}
+	if resp.Diagnostics.HasError() {
+		return
+	}
 	v := &vault{
 		username: valueOrEnv(config.Username, "LASTPASS_USER"),
 		password: valueOrEnv(config.Password, "LASTPASS_PASSWORD"),
@@ -79,7 +91,7 @@ func (p *lastpassProvider) DataSources(context.Context) []func() datasource.Data
 }
 
 func valueOrEnv(value types.String, variable string) string {
-	if value.IsNull() || value.IsUnknown() {
+	if value.IsNull() {
 		return os.Getenv(variable)
 	}
 	return value.ValueString()

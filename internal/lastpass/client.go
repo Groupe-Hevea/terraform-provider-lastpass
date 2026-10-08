@@ -1,6 +1,7 @@
 package lastpass
 
 import (
+	"bytes"
 	"context"
 	"crypto/rsa"
 	"encoding/base64"
@@ -14,31 +15,31 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 )
 
 const (
 	endpointLogin       = "/login.php"
 	endpointVault       = "/getaccts.php"
 	endpointShowWebsite = "/show_website.php"
-	endpointLogout      = "/logout.php"
 )
 
 // defaultIterations is the first guess for the number of PBKDF2 rounds of the
 // account. LastPass answers with the real value when the guess is wrong.
 const defaultIterations = 100100
 
-// ErrAccountNotFound is returned when an entry to update or delete does not exist.
+// requestTimeout bounds every call. Writes run detached from the caller's
+// cancellation (see the provider), so they need a limit of their own.
+const requestTimeout = 2 * time.Minute
+
+// newAccountID is the ID a write request carries to create an entry.
+const newAccountID = "0"
+
+// ErrAccountNotFound is returned when LastPass answers a write with an empty
+// reply, which is how it answers for an entry that does not exist. Nothing
+// tells that case apart from another silent refusal: a caller that cares
+// should check the vault.
 var ErrAccountNotFound = errors.New("lastpass: entry not found")
-
-// AuthenticationError is a login refused by LastPass.
-type AuthenticationError struct {
-	Cause   string
-	Message string
-}
-
-func (e *AuthenticationError) Error() string {
-	return fmt.Sprintf("lastpass: login refused (%s): %s", e.Cause, e.Message)
-}
 
 // Client is an authenticated LastPass session.
 type Client struct {
@@ -68,16 +69,16 @@ func Login(ctx context.Context, username, password string, opts ...Option) (*Cli
 	if err != nil {
 		return nil, err
 	}
-	c := &Client{http: &http.Client{Jar: jar}, baseURL: "https://lastpass.com"}
+	c := &Client{http: &http.Client{Jar: jar, Timeout: requestTimeout}, baseURL: "https://lastpass.com"}
 	for _, opt := range opts {
 		opt(c)
 	}
 
 	iterations := defaultIterations
 	for attempt := 0; ; attempt++ {
-		loginHash, key, err := DeriveKeys(username, password, iterations)
+		loginHash, key, err := deriveKeys(username, password, iterations)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("lastpass: %w", err)
 		}
 		reply, err := c.post(ctx, endpointLogin, url.Values{
 			"method":               {"cli"},
@@ -103,7 +104,7 @@ func Login(ctx context.Context, username, password string, opts ...Option) (*Cli
 				}
 				continue
 			}
-			return nil, &AuthenticationError{Cause: attrs["cause"], Message: attrs["message"]}
+			return nil, fmt.Errorf("lastpass: login refused (%s): %s", attrs["cause"], attrs["message"])
 		}
 
 		if c.token = attrs["token"]; c.token == "" {
@@ -111,21 +112,11 @@ func Login(ctx context.Context, username, password string, opts ...Option) (*Cli
 		}
 		c.key = key
 		c.urlEncryption = attrs["url_encryption"] == "1"
-		if c.privateKey, err = decryptPrivateKey(attrs["privatekeyenc"], key); err != nil {
-			return nil, fmt.Errorf("lastpass: cannot decrypt the account private key: %w", err)
-		}
+		// Like the official client, a private key that cannot be decrypted does
+		// not prevent the login: only shared folders that need it are affected.
+		c.privateKey, _ = decryptPrivateKey(attrs["privatekeyenc"], key)
 		return c, nil
 	}
-}
-
-// Logout ends the session.
-func (c *Client) Logout(ctx context.Context) error {
-	_, err := c.post(ctx, endpointLogout, url.Values{
-		"method":     {"cli"},
-		"noredirect": {"1"},
-		"token":      {c.token},
-	})
-	return err
 }
 
 // Vault downloads and decrypts the whole vault. LastPass offers no way to
@@ -156,24 +147,23 @@ func (c *Client) Vault(ctx context.Context) (*Vault, error) {
 	return vault, nil
 }
 
-// Add creates the entry and sets account.ID to the identifier LastPass
-// assigned. vault must be a current snapshot: it provides the shared folders.
-func (c *Client) Add(ctx context.Context, vault *Vault, account *Account) error {
-	account.ID = "0"
+// Add creates the entry and returns the ID LastPass assigned; account.ID is
+// ignored. vault must be a current snapshot: it provides the shared folders.
+func (c *Client) Add(ctx context.Context, vault *Vault, account Account) (string, error) {
+	account.ID = newAccountID
 	result, err := c.upsert(ctx, vault, account)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if result["msg"] != "accountadded" || result["aid"] == "" {
-		return fmt.Errorf("lastpass: entry was not created (%s)", result["msg"])
+		return "", fmt.Errorf("lastpass: entry was not created (%s)", result["msg"])
 	}
-	account.ID = result["aid"]
-	return nil
+	return result["aid"], nil
 }
 
 // Update overwrites the entry account.ID. An entry cannot change shared
 // folder this way: account.Share must be the folder it already is in.
-func (c *Client) Update(ctx context.Context, vault *Vault, account *Account) error {
+func (c *Client) Update(ctx context.Context, vault *Vault, account Account) error {
 	result, err := c.upsert(ctx, vault, account)
 	if err != nil {
 		return err
@@ -185,14 +175,14 @@ func (c *Client) Update(ctx context.Context, vault *Vault, account *Account) err
 }
 
 // Delete removes the entry account.ID; only ID and Share are read.
-func (c *Client) Delete(ctx context.Context, vault *Vault, account *Account) error {
+func (c *Client) Delete(ctx context.Context, vault *Vault, account Account) error {
 	form := url.Values{
 		"extjs":  {"1"},
 		"delete": {"1"},
 		"aid":    {account.ID},
 		"token":  {c.token},
 	}
-	if _, err := c.addShare(form, vault, account); err != nil {
+	if _, err := c.addShare(form, vault, account.Share); err != nil {
 		return err
 	}
 	result, err := c.showWebsite(ctx, form)
@@ -205,18 +195,22 @@ func (c *Client) Delete(ctx context.Context, vault *Vault, account *Account) err
 	return nil
 }
 
-func (c *Client) upsert(ctx context.Context, vault *Vault, account *Account) (map[string]string, error) {
+func (c *Client) upsert(ctx context.Context, vault *Vault, account Account) (map[string]string, error) {
 	if account.Name == "" {
 		return nil, errors.New("lastpass: an entry needs a name")
+	}
+	reprompt := "off"
+	if account.Reprompt {
+		reprompt = "on"
 	}
 	form := url.Values{
 		"extjs":     {"1"},
 		"token":     {c.token},
 		"method":    {"cli"},
-		"pwprotect": {"off"},
+		"pwprotect": {reprompt},
 		"aid":       {account.ID},
 	}
-	key, err := c.addShare(form, vault, account)
+	key, err := c.addShare(form, vault, account.Share)
 	if err != nil {
 		return nil, err
 	}
@@ -227,18 +221,18 @@ func (c *Client) upsert(ctx context.Context, vault *Vault, account *Account) (ma
 		"password": account.Password,
 		"extra":    account.Notes,
 	} {
-		encrypted, err := EncryptField(value, key)
+		encrypted, err := encryptField(value, key)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("lastpass: %w", err)
 		}
 		form.Set(param, encrypted)
 	}
 	// Like the official client: the URL is encrypted only when the account
 	// has URL encryption enabled, and never for a secure note.
 	if c.urlEncryption && account.URL != urlSecureNote {
-		encrypted, err := EncryptField(account.URL, key)
+		encrypted, err := encryptField(account.URL, key)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("lastpass: %w", err)
 		}
 		form.Set("url", encrypted)
 	} else {
@@ -247,14 +241,15 @@ func (c *Client) upsert(ctx context.Context, vault *Vault, account *Account) (ma
 	return c.showWebsite(ctx, form)
 }
 
-// addShare resolves the shared folder of the entry, adds it to the request
-// and returns the key that encrypts the entry.
-func (c *Client) addShare(form url.Values, vault *Vault, account *Account) ([]byte, error) {
-	if account.Share == "" {
+// addShare resolves a shared folder by name, adds it to the request and
+// returns the key that encrypts its entries. An empty name is the personal
+// vault.
+func (c *Client) addShare(form url.Values, vault *Vault, name string) ([]byte, error) {
+	if name == "" {
 		return c.key, nil
 	}
 	for _, s := range vault.shares {
-		if s.name != account.Share {
+		if s.name != name {
 			continue
 		}
 		if s.readOnly {
@@ -263,11 +258,10 @@ func (c *Client) addShare(form url.Values, vault *Vault, account *Account) ([]by
 		form.Set("sharedfolderid", s.id)
 		return s.key, nil
 	}
-	return nil, fmt.Errorf("lastpass: shared folder %s not found: it does not exist or is not shared with this account", account.Share)
+	return nil, fmt.Errorf("lastpass: shared folder %s not found: it does not exist, is not shared with this account, or cannot be opened", name)
 }
 
 // showWebsite posts a write and returns the attributes of its <result>.
-// LastPass answers a write on an unknown entry with an empty body.
 func (c *Client) showWebsite(ctx context.Context, form url.Values) (map[string]string, error) {
 	reply, err := c.post(ctx, endpointShowWebsite, form)
 	if err != nil {
@@ -301,14 +295,18 @@ func (c *Client) do(req *http.Request) ([]byte, error) {
 	if res.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("lastpass: %s %s: %s", req.Method, req.URL.Path, res.Status)
 	}
-	return io.ReadAll(res.Body)
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		return nil, fmt.Errorf("lastpass: %w", err)
+	}
+	return body, nil
 }
 
 // firstElement returns the name and attributes of the first XML element
 // called one of names, wherever it sits in the document: LastPass wraps its
 // answers differently from one endpoint and protocol version to the next.
 func firstElement(document []byte, names ...string) (string, map[string]string, error) {
-	decoder := xml.NewDecoder(strings.NewReader(string(document)))
+	decoder := xml.NewDecoder(bytes.NewReader(document))
 	for {
 		token, err := decoder.Token()
 		if err != nil {

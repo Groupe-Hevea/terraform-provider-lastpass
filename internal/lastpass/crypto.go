@@ -18,9 +18,9 @@ import (
 
 const keyLength = 32
 
-// DeriveKeys returns the hash sent to LastPass to authenticate and the key
+// deriveKeys returns the hash sent to LastPass to authenticate and the key
 // that encrypts the vault. LastPass salts the key with the lowercase username.
-func DeriveKeys(username, password string, iterations int) (loginHash string, key []byte, err error) {
+func deriveKeys(username, password string, iterations int) (loginHash string, key []byte, err error) {
 	if iterations < 2 {
 		// A single iteration selects a legacy SHA-256 scheme that the official client refuses.
 		return "", nil, fmt.Errorf("unsupported number of password iterations: %d", iterations)
@@ -36,10 +36,10 @@ func DeriveKeys(username, password string, iterations int) (loginHash string, ke
 	return hex.EncodeToString(hash), key, nil
 }
 
-// EncryptField encrypts a vault field the way the official client does:
-// AES-256-CBC, serialized as "!<base64 iv>|<base64 ciphertext>". An empty
-// field stays empty.
-func EncryptField(plaintext string, key []byte) (string, error) {
+// encryptField encrypts a field for a write request the way the official
+// client does: AES-256-CBC, serialized as "!<base64 iv>|<base64 ciphertext>".
+// An empty field stays empty.
+func encryptField(plaintext string, key []byte) (string, error) {
 	if plaintext == "" {
 		return "", nil
 	}
@@ -57,9 +57,10 @@ func EncryptField(plaintext string, key []byte) (string, error) {
 	return "!" + base64.StdEncoding.EncodeToString(iv) + "|" + base64.StdEncoding.EncodeToString(ciphertext), nil
 }
 
-// DecryptField decrypts a vault field. LastPass has used four serializations
-// over time (CBC or ECB, raw or base64); the vault can mix them.
-func DecryptField(data, key []byte) (string, error) {
+// decryptField decrypts a field. The vault holds fields as "!" followed by
+// the raw IV and ciphertext (AES-CBC); entries nobody rewrote in years can
+// still be AES-ECB, and some values travel in the base64 forms.
+func decryptField(data, key []byte) (string, error) {
 	const ivBase64Len = 24 // base64 of a 16-byte IV
 
 	size := len(data)
@@ -126,9 +127,12 @@ func pkcs7Pad(data []byte) []byte {
 	return append(data, bytes.Repeat([]byte{byte(padding)}, padding)...)
 }
 
+// pkcs7Unpad removes the padding of a decrypted field. The padding is the
+// only integrity check the format offers: a wrong key almost always breaks it.
 func pkcs7Unpad(data []byte) (string, error) {
 	padding := int(data[len(data)-1])
-	if padding == 0 || padding > aes.BlockSize || padding > len(data) {
+	if padding == 0 || padding > aes.BlockSize ||
+		!bytes.Equal(data[len(data)-padding:], bytes.Repeat([]byte{byte(padding)}, padding)) {
 		return "", errors.New("decryption failed: wrong key or corrupted field")
 	}
 	return string(data[:len(data)-padding]), nil
@@ -138,17 +142,26 @@ func pkcs7Unpad(data []byte) (string, error) {
 // returns at login encrypted with the vault key. It is only needed for shared
 // folders whose sharing key was never re-encrypted with the vault key. The
 // result is nil when the account has no key pair yet.
-func decryptPrivateKey(encryptedHex string, key []byte) (*rsa.PrivateKey, error) {
-	if encryptedHex == "" {
+func decryptPrivateKey(encrypted string, key []byte) (*rsa.PrivateKey, error) {
+	var annotated string
+	switch {
+	case encrypted == "":
 		return nil, nil
-	}
-	encrypted, err := hex.DecodeString(encryptedHex)
-	if err != nil {
-		return nil, err
-	}
-	annotated, err := decryptCBC(key[:aes.BlockSize], encrypted, key)
-	if err != nil {
-		return nil, err
+	case strings.HasPrefix(encrypted, "!"):
+		// Current format: serialized like any other field.
+		var err error
+		if annotated, err = decryptField([]byte(encrypted), key); err != nil {
+			return nil, err
+		}
+	default:
+		// Original format: hex-encoded AES-CBC, with the start of the key as IV.
+		ciphertext, err := hex.DecodeString(encrypted)
+		if err != nil {
+			return nil, err
+		}
+		if annotated, err = decryptCBC(key[:aes.BlockSize], ciphertext, key); err != nil {
+			return nil, err
+		}
 	}
 	keyHex := strings.TrimSuffix(strings.TrimPrefix(annotated, "LastPassPrivateKey<"), ">LastPassPrivateKey")
 	der, err := hex.DecodeString(keyHex)

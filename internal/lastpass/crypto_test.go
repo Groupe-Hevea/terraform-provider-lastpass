@@ -3,24 +3,66 @@ package lastpass
 import (
 	"bytes"
 	"crypto/aes"
-	"crypto/cipher"
 	"encoding/base64"
+	"encoding/hex"
 	"strings"
 	"testing"
 )
 
 var testKey = bytes.Repeat([]byte{0x2a}, keyLength)
 
-func TestEncryptFieldRoundTrip(t *testing.T) {
-	for _, plaintext := range []string{"a", "sixteen byte txt", "accents: éàü — and\nnewlines\n", strings.Repeat("long ", 500)} {
-		encrypted, err := EncryptField(plaintext, testKey)
+// Reference values computed outside this code base, with Python's
+// hashlib.pbkdf2_hmac: key = PBKDF2-SHA256(password, salt=username, 5000
+// rounds), login hash = PBKDF2-SHA256(key, salt=password, 1 round).
+func TestDeriveKeysKnownAnswer(t *testing.T) {
+	const (
+		wantKey  = "a63f69af0fce1cf95e5c8e9b45d9a5683fac6894b86b0acc890b108838debb62"
+		wantHash = "f4b7593300ca55b5737fb749e926d85cddd0bb19c3008d3fc7ee4682914aa99d"
+	)
+	// LastPass salts with the lowercase username: the case must not matter.
+	for _, username := range []string{"user@example.com", "User@Example.COM"} {
+		hash, key, err := deriveKeys(username, "password", 5000)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !strings.HasPrefix(encrypted, "!") || !strings.Contains(encrypted, "|") {
-			t.Errorf("unexpected serialization %q", encrypted)
+		if hex.EncodeToString(key) != wantKey || hash != wantHash {
+			t.Errorf("deriveKeys(%q) = key %x, hash %s", username, key, hash)
 		}
-		decrypted, err := DecryptField([]byte(encrypted), testKey)
+	}
+}
+
+func TestDeriveKeysRefusesTheLegacyScheme(t *testing.T) {
+	if _, _, err := deriveKeys("user@example.com", "password", 1); err == nil {
+		t.Error("a single iteration was accepted")
+	}
+}
+
+// Reference ciphertext computed with `openssl enc -aes-256-cbc` for the key
+// 0x2a x 32 and the IV 0x07 x 16, in each serialization LastPass uses.
+func TestDecryptFieldKnownAnswer(t *testing.T) {
+	const plaintext = "known answer"
+	iv := bytes.Repeat([]byte{0x07}, aes.BlockSize)
+	ciphertext, err := base64.StdEncoding.DecodeString("3x35RDkAy3JwNQIwP2SA8g==")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, data := range map[string][]byte{
+		"vault (raw)":    append(append([]byte("!"), iv...), ciphertext...),
+		"write (base64)": []byte("!BwcHBwcHBwcHBwcHBwcHBw==|3x35RDkAy3JwNQIwP2SA8g=="),
+	} {
+		if decrypted, err := decryptField(data, testKey); err != nil || decrypted != plaintext {
+			t.Errorf("%s: got %q, %v", name, decrypted, err)
+		}
+	}
+}
+
+func TestEncryptFieldRoundTrip(t *testing.T) {
+	for _, plaintext := range []string{"a", "sixteen byte txt", "accents: éàü — and\nnewlines\n", strings.Repeat("long ", 500)} {
+		encrypted, err := encryptField(plaintext, testKey)
+		if err != nil {
+			t.Fatal(err)
+		}
+		decrypted, err := decryptField([]byte(encrypted), testKey)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -31,78 +73,54 @@ func TestEncryptFieldRoundTrip(t *testing.T) {
 }
 
 func TestEmptyFieldStaysEmpty(t *testing.T) {
-	encrypted, err := EncryptField("", testKey)
+	encrypted, err := encryptField("", testKey)
 	if err != nil || encrypted != "" {
-		t.Errorf("EncryptField(\"\") = %q, %v", encrypted, err)
+		t.Errorf("encryptField(\"\") = %q, %v", encrypted, err)
 	}
-	decrypted, err := DecryptField(nil, testKey)
+	decrypted, err := decryptField(nil, testKey)
 	if err != nil || decrypted != "" {
-		t.Errorf("DecryptField(nil) = %q, %v", decrypted, err)
+		t.Errorf("decryptField(nil) = %q, %v", decrypted, err)
 	}
 }
 
-// The vault can still hold fields in the serializations older clients wrote.
-func TestDecryptFieldLegacySerializations(t *testing.T) {
+// Entries nobody rewrote in years are still AES-ECB.
+func TestDecryptFieldECB(t *testing.T) {
 	const plaintext = "legacy value"
 	block, err := aes.NewCipher(testKey)
 	if err != nil {
 		t.Fatal(err)
 	}
 	padded := pkcs7Pad([]byte(plaintext))
-
 	ecb := make([]byte, len(padded))
 	for i := 0; i < len(padded); i += aes.BlockSize {
 		block.Encrypt(ecb[i:i+aes.BlockSize], padded[i:i+aes.BlockSize])
 	}
-	iv := bytes.Repeat([]byte{0x07}, aes.BlockSize)
-	cbc := make([]byte, len(padded))
-	cipher.NewCBCEncrypter(block, iv).CryptBlocks(cbc, padded)
-
 	for name, data := range map[string][]byte{
-		"raw ECB":    ecb,
-		"base64 ECB": []byte(base64.StdEncoding.EncodeToString(ecb)),
-		"raw CBC":    append(append([]byte("!"), iv...), cbc...),
+		"raw":    ecb,
+		"base64": []byte(base64.StdEncoding.EncodeToString(ecb)),
 	} {
-		decrypted, err := DecryptField(data, testKey)
-		if err != nil || decrypted != plaintext {
+		if decrypted, err := decryptField(data, testKey); err != nil || decrypted != plaintext {
 			t.Errorf("%s: got %q, %v", name, decrypted, err)
 		}
 	}
 }
 
-func TestDecryptFieldRejectsTheWrongKey(t *testing.T) {
-	encrypted, err := EncryptField("secret", testKey)
+// The padding is the only integrity check of the format. With every padding
+// byte verified, a wrong key passes it about once in 250 tries.
+func TestDecryptFieldDetectsTheWrongKey(t *testing.T) {
+	encrypted, err := encryptField("secret", testKey)
 	if err != nil {
 		t.Fatal(err)
 	}
-	wrongKey := bytes.Repeat([]byte{0x01}, keyLength)
-	// A wrong key yields random padding: it is detected in all but a few cases
-	// per thousand, never silently accepted as the right plaintext.
-	if decrypted, err := DecryptField([]byte(encrypted), wrongKey); err == nil && decrypted == "secret" {
-		t.Error("the wrong key decrypted the field")
+	const tries = 2000
+	accepted := 0
+	for i := range tries {
+		wrongKey := bytes.Repeat([]byte{byte(i), byte(i >> 8), 0x55, 0xaa}, keyLength/4)
+		if _, err := decryptField([]byte(encrypted), wrongKey); err == nil {
+			accepted++
+		}
 	}
-}
-
-func TestDeriveKeysRefusesTheLegacyScheme(t *testing.T) {
-	if _, _, err := DeriveKeys("user@example.com", "password", 1); err == nil {
-		t.Error("a single iteration was accepted")
-	}
-}
-
-// LastPass salts the vault key with the lowercase username.
-func TestDeriveKeysIsCaseInsensitiveOnTheUsername(t *testing.T) {
-	hashLower, keyLower, err := DeriveKeys("user@example.com", "password", 5000)
-	if err != nil {
-		t.Fatal(err)
-	}
-	hashUpper, keyUpper, err := DeriveKeys("User@Example.COM", "password", 5000)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if hashLower != hashUpper || !bytes.Equal(keyLower, keyUpper) {
-		t.Error("the username case changed the derived keys")
-	}
-	if len(keyLower) != keyLength || len(hashLower) != 2*keyLength {
-		t.Errorf("unexpected key sizes: key %d bytes, hash %d characters", len(keyLower), len(hashLower))
+	if accepted > tries/50 {
+		t.Errorf("%d wrong keys out of %d decrypted without error", accepted, tries)
 	}
 }

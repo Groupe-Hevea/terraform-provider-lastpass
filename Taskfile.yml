@@ -8,11 +8,12 @@ tasks:
     silent: true
 
   test:
-    desc: Run the tests (needs terraform on the PATH)
+    desc: Vet and test (needs terraform, installed by aqua)
     cmds:
+      - go vet ./...
       - go test ./...
 
   install:
     desc: Build the provider into $GOBIN, for a dev override
     cmds:
-      - go install -trimpath -ldflags "-s -w -X main.version=dev" .
+      - go install -trimpath .

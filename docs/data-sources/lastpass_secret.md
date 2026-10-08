@@ -37,4 +37,4 @@ output "host" {
 * `group`
 * `url`
 * `note` - A multi-line note is returned with a final newline.
-* `custom_fields` - Fields of a typed secure note, by name. Empty for other entries.
+* `custom_fields` - Fields of a typed secure note, by name. Empty for other entries. The free-text field `Notes`, last in the note, carries the same final newline.
