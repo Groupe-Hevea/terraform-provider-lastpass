@@ -12,6 +12,8 @@ func (c *Client) Update(s Secret) error {
 	if err != nil {
 		return err
 	}
+	c.vaultMutex.Lock()
+	defer c.vaultMutex.Unlock()
 	template := s.getTemplate()
 	cmd := exec.Command("lpass", "edit", s.ID, "--non-interactive", "--sync=now")
 	var inbuf, errbuf bytes.Buffer

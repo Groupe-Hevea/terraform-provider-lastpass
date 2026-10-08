@@ -13,6 +13,8 @@ func (c *Client) Delete(id string) error {
 	if err != nil {
 		return err
 	}
+	c.vaultMutex.Lock()
+	defer c.vaultMutex.Unlock()
 	var errbuf bytes.Buffer
 	cmd := exec.Command("lpass", "rm", id, "--sync=now")
 	cmd.Stderr = &errbuf

@@ -34,6 +34,12 @@ type Client struct {
 	CredentialsProvided bool
 	loginMutex          sync.Mutex
 	loggedIn            bool
+	// vaultMutex serializes lpass commands that modify the vault. lpass
+	// processes share one local blob and one upload queue: concurrent
+	// writes corrupt each other ("Could not unbase64 the given bytes").
+	// Reads take the shared lock, so they still run in parallel with each
+	// other but never while a write is in flight.
+	vaultMutex sync.RWMutex
 }
 
 func (s *Secret) genCustomFields() {

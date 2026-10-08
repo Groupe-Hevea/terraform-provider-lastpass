@@ -15,6 +15,8 @@ func (c *Client) Read(id string) ([]Secret, error) {
 	if err != nil {
 		return secrets, err
 	}
+	c.vaultMutex.RLock()
+	defer c.vaultMutex.RUnlock()
 	cmd := exec.Command("lpass", "show", "--sync=auto", "-G", id, "--json", "-x")
 	var outbuf, errbuf bytes.Buffer
 	cmd.Stdout = &outbuf
