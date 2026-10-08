@@ -4,37 +4,34 @@
 
 ```hcl
 resource "lastpass_secret" "mysecret" {
-    name = "My site"
-    username = "foobar"
-    password = file("${path.module}/secret")
-    url = "https://example.com"
-    note = <<EOF
-Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nam sed elit nec orci
-cursus rhoncus. Morbi lacus turpis, volutpat in lobortis vel, mattis nec magna.
-Cras gravida libero vitae nisl iaculis ultrices. Fusce odio ligula, pharetra ac
-viverra semper, consequat quis risus.
-EOF
+  name     = "Shared-Infra/sites/My site"
+  username = "foobar"
+  password = file("${path.module}/secret")
+  url      = "https://example.com"
+  note     = <<-EOF
+    Managed by Terraform.
+    Do not edit by hand.
+  EOF
 }
 ```
 
 ## Argument Reference
 
-* `name` - (Required) Must be unique, and can contain full directory path. Changing name will force recreation.
-* `username` - (Optional) 
-* `password` - (Optional) 
-* `url` - (Optional) 
-* `note` - (Optional)
+* `name` - (Required) Full path of the entry: `<shared folder>/<folder>/<name>`, the first two being optional. A shared folder is recognised by its `Shared-` prefix and must already exist and be writable for the account. The folder may contain `/`. Changing the name recreates the entry.
+* `username` - (Optional)
+* `password` - (Optional)
+* `url` - (Optional)
+* `note` - (Optional) LastPass stores the note without trailing newline: a note that differs from the stored one only by trailing newlines is not a change.
+
+An optional argument left out of the configuration keeps the value LastPass holds.
 
 ## Attribute Reference
 
-* `fullname`
-* `username`
-* `password`
-* `last_modified_gmt`
-* `last_touch`
-* `group`
-* `url`
-* `note`
+* `id` - Identifier assigned by LastPass.
+* `fullname` - Same as `name`.
+* `group` - Folder of the entry inside its shared folder.
+* `last_modified_gmt` - Last modification, in seconds since the epoch.
+* `last_touch` - Last access, in seconds since the epoch.
 
 ## Importer
 

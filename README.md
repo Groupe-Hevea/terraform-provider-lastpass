@@ -1,39 +1,45 @@
-# terraform-provider-lastpass 
-[![release](https://img.shields.io/github/release/nrkno/terraform-provider-lastpass.svg?style=flat-square)](https://github.com/Groupe-Hevea/terraform-provider-lastpass/releases/latest) [![Build Status](https://travis-ci.com/nrkno/terraform-provider-lastpass.svg?branch=master)](https://travis-ci.com/nrkno/terraform-provider-lastpass) [![Go Report Card](https://goreportcard.com/badge/github.com/Groupe-Hevea/terraform-provider-lastpass)](https://goreportcard.com/report/github.com/Groupe-Hevea/terraform-provider-lastpass) [![GoDoc](https://godoc.org/github.com/github.com/Groupe-Hevea/terraform-provider-lastpass/lastpass?status.svg)](https://godoc.org/github.com/Groupe-Hevea/terraform-provider-lastpass/lastpass)
+# terraform-provider-lastpass
 
-<img src="https://cdn.rawgit.com/hashicorp/terraform-website/master/content/source/assets/images/logo-hashicorp.svg" width="400px">
+Terraform provider to read, manage and destroy entries of a LastPass vault.
 
-The Lastpass provider is used to read, manage, or destroy secrets inside Lastpass. Goodbye secret .tfvars files 👋
+It talks to LastPass directly, without the `lpass` command line client. LastPass has no public API for vault entries: the provider speaks the private protocol of the official client, implemented in `internal/lastpass`.
 
 ```hcl
 terraform {
   required_providers {
     lastpass = {
-      source = "nrkno/lastpass"
+      source = "Groupe-Hevea/lastpass"
     }
   }
 }
 
 resource "lastpass_secret" "mysecret" {
-    name = "My site"
-    username = "foobar"
-    password = file("${path.module}/secret")
-    url = "https://example.com"
-    note = <<EOF
-Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nam sed elit nec orci
-cursus rhoncus. Morbi lacus turpis, volutpat in lobortis vel, mattis nec magna.
-Cras gravida libero vitae nisl iaculis ultrices. Fusce odio ligula, pharetra ac
-viverra semper, consequat quis risus.
-EOF
+  name     = "Shared-Infra/sites/My site"
+  username = "foobar"
+  password = file("${path.module}/secret")
+  url      = "https://example.com"
 }
-
 ```
 
-Documentation and examples can be found inside the Terraform registry:
+Documentation: [docs](docs/index.md).
 
-- [Terraform Registry](https://registry.terraform.io/providers/nrkno/lastpass/latest)
-- [Documentation](https://registry.terraform.io/providers/nrkno/lastpass/latest/docs)
- 
+## Development
+
+Tools are pinned with [aqua](https://aquaproj.github.io/) (`aqua i`), tasks run with [Task](https://taskfile.dev/):
+
+```
+task test      # unit tests, and Terraform runs against a fake LastPass server (needs terraform on the PATH)
+task install   # build the provider into $GOBIN, for a dev override
+```
+
+The tests never reach LastPass: `internal/lastpass/lastpasstest` is an in-memory server that speaks the real wire formats.
+
+A release is cut by pushing a `v*` tag.
+
+## Origins
+
+Fork of [nrkno/terraform-provider-lastpass](https://github.com/nrkno/terraform-provider-lastpass), rewritten in version 1 on the Terraform plugin framework. The LastPass client derives from [ansd/lastpass-go](https://github.com/ansd/lastpass-go) (MIT, see `internal/lastpass/LICENSE`).
+
 ## License
 
 [Apache](LICENSE)

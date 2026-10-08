@@ -1,0 +1,18 @@
+version: '3'
+
+tasks:
+  default:
+    desc: List tasks
+    cmds:
+      - task --list
+    silent: true
+
+  test:
+    desc: Run the tests (needs terraform on the PATH)
+    cmds:
+      - go test ./...
+
+  install:
+    desc: Build the provider into $GOBIN, for a dev override
+    cmds:
+      - go install -trimpath -ldflags "-s -w -X main.version=dev" .
