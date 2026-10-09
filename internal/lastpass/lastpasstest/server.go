@@ -65,6 +65,9 @@ const (
 	// Ignore does nothing and answers an empty reply, the way LastPass
 	// answers a write it does not act on.
 	Ignore
+	// Throttle does nothing and answers "429 Too Many Requests", asking the
+	// client to try again at once.
+	Throttle
 )
 
 // Server is a fake LastPass account.
@@ -140,6 +143,7 @@ func New(t testing.TB, username, password string) *Server {
 		clock:         1700000000,
 	}
 	mux := http.NewServeMux()
+	mux.HandleFunc("POST /iterations.php", s.handle(s.iterations))
 	mux.HandleFunc("POST /login.php", s.handle(s.login))
 	mux.HandleFunc("GET /getaccts.php", s.handle(s.authenticated(s.vault)))
 	mux.HandleFunc("POST /show_website.php", s.handle(s.authenticated(s.showWebsite)))
@@ -230,6 +234,9 @@ func (s *Server) handle(next http.HandlerFunc) http.HandlerFunc {
 			next(httptest.NewRecorder(), r)
 			http.Error(w, "reply lost", http.StatusBadGateway)
 		case failing && failure == Ignore:
+		case failing && failure == Throttle:
+			w.Header().Set("Retry-After", "0")
+			http.Error(w, "too many requests", http.StatusTooManyRequests)
 		default:
 			next(w, r)
 		}
@@ -248,17 +255,23 @@ func (s *Server) authenticated(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// iterations answers the number of PBKDF2 rounds of the account, which a
+// client asks before logging in.
+func (s *Server) iterations(w http.ResponseWriter, r *http.Request) {
+	if r.PostForm.Get("email") != strings.ToLower(s.username) {
+		http.Error(w, "unexpected email", http.StatusBadRequest)
+		return
+	}
+	fmt.Fprint(w, iterations)
+}
+
 func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	form := r.PostForm
 	if form.Get("method") != "cli" || form.Get("xml") != "2" {
 		http.Error(w, "unexpected client", http.StatusBadRequest)
 		return
 	}
-	if form.Get("iterations") != strconv.Itoa(iterations) {
-		fmt.Fprintf(w, `<response><error iterations="%d" /></response>`, iterations)
-		return
-	}
-	if form.Get("username") != strings.ToLower(s.username) || form.Get("hash") != s.loginHash {
+	if form.Get("iterations") != strconv.Itoa(iterations) || form.Get("username") != strings.ToLower(s.username) || form.Get("hash") != s.loginHash {
 		fmt.Fprint(w, `<response><error message="Invalid Password!" cause="unknownpassword" /></response>`)
 		return
 	}

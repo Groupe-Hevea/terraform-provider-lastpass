@@ -266,9 +266,8 @@ func TestRefusedLoginIsNotRetried(t *testing.T) {
 			t.Fatalf("got %v, want a refused login", err)
 		}
 	}
-	// One wrong guess of the iteration count, then the refused login.
-	if got := len(server.Requests("/login.php")); got != 2 {
-		t.Errorf("got %d login requests for 5 reads, want 2", got)
+	if got := len(server.Requests("/login.php")); got != 1 {
+		t.Errorf("got %d login requests for 5 reads, want 1", got)
 	}
 }
 

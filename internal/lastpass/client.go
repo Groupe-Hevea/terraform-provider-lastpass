@@ -19,18 +19,24 @@ import (
 )
 
 const (
+	endpointIterations  = "/iterations.php"
 	endpointLogin       = "/login.php"
 	endpointVault       = "/getaccts.php"
 	endpointShowWebsite = "/show_website.php"
 )
 
-// defaultIterations is the first guess for the number of PBKDF2 rounds of the
-// account. LastPass answers with the real value when the guess is wrong.
-const defaultIterations = 100100
-
 // requestTimeout bounds every call. Writes run detached from the caller's
 // cancellation (see the provider), so they need a limit of their own.
 const requestTimeout = 2 * time.Minute
+
+// LastPass throttles logins: a handful within a few seconds, which separate
+// Terraform commands run in a row easily reach, are answered "429 Too Many
+// Requests" for about a minute. A throttled request is retried after the
+// delay LastPass asks for, or after throttleBackoff, 2x, 3x... otherwise.
+const (
+	throttleBackoff = 10 * time.Second
+	throttleRetries = 4
+)
 
 // newAccountID is the ID a write request carries to create an entry.
 const newAccountID = "0"
@@ -74,49 +80,48 @@ func Login(ctx context.Context, username, password string, opts ...Option) (*Cli
 		opt(c)
 	}
 
-	iterations := defaultIterations
-	for attempt := 0; ; attempt++ {
-		loginHash, key, err := deriveKeys(username, password, iterations)
-		if err != nil {
-			return nil, fmt.Errorf("lastpass: %w", err)
-		}
-		reply, err := c.post(ctx, endpointLogin, url.Values{
-			"method":               {"cli"},
-			"xml":                  {"2"},
-			"username":             {strings.ToLower(username)},
-			"hash":                 {loginHash},
-			"iterations":           {strconv.Itoa(iterations)},
-			"includeprivatekeyenc": {"1"},
-		})
-		if err != nil {
-			return nil, err
-		}
-		element, attrs, err := firstElement(reply, "ok", "error")
-		if err != nil {
-			return nil, fmt.Errorf("lastpass: unexpected login reply: %w", err)
-		}
-
-		if element == "error" {
-			// A wrong guess of the iteration count is answered with the right one.
-			if hint := attrs["iterations"]; hint != "" && attempt == 0 {
-				if iterations, err = strconv.Atoi(hint); err != nil {
-					return nil, fmt.Errorf("lastpass: unexpected iteration count %q", hint)
-				}
-				continue
-			}
-			return nil, fmt.Errorf("lastpass: login refused (%s): %s", attrs["cause"], attrs["message"])
-		}
-
-		if c.token = attrs["token"]; c.token == "" {
-			return nil, errors.New("lastpass: unexpected login reply: no session token")
-		}
-		c.key = key
-		c.urlEncryption = attrs["url_encryption"] == "1"
-		// Like the official client, a private key that cannot be decrypted does
-		// not prevent the login: only shared folders that need it are affected.
-		c.privateKey, _ = decryptPrivateKey(attrs["privatekeyenc"], key)
-		return c, nil
+	// Like the official client, ask for the number of PBKDF2 rounds of the
+	// account first: guessing it would cost a refused login each time.
+	email := strings.ToLower(username)
+	reply, err := c.post(ctx, endpointIterations, url.Values{"email": {email}})
+	if err != nil {
+		return nil, err
 	}
+	iterations, err := strconv.Atoi(strings.TrimSpace(string(reply)))
+	if err != nil {
+		return nil, fmt.Errorf("lastpass: unexpected iteration count %q", reply)
+	}
+	loginHash, key, err := deriveKeys(username, password, iterations)
+	if err != nil {
+		return nil, fmt.Errorf("lastpass: %w", err)
+	}
+	reply, err = c.post(ctx, endpointLogin, url.Values{
+		"method":               {"cli"},
+		"xml":                  {"2"},
+		"username":             {email},
+		"hash":                 {loginHash},
+		"iterations":           {strconv.Itoa(iterations)},
+		"includeprivatekeyenc": {"1"},
+	})
+	if err != nil {
+		return nil, err
+	}
+	element, attrs, err := firstElement(reply, "ok", "error")
+	if err != nil {
+		return nil, fmt.Errorf("lastpass: unexpected login reply: %w", err)
+	}
+	if element == "error" {
+		return nil, fmt.Errorf("lastpass: login refused (%s): %s", attrs["cause"], attrs["message"])
+	}
+	if c.token = attrs["token"]; c.token == "" {
+		return nil, errors.New("lastpass: unexpected login reply: no session token")
+	}
+	c.key = key
+	c.urlEncryption = attrs["url_encryption"] == "1"
+	// Like the official client, a private key that cannot be decrypted does
+	// not prevent the login: only shared folders that need it are affected.
+	c.privateKey, _ = decryptPrivateKey(attrs["privatekeyenc"], key)
+	return c, nil
 }
 
 // Vault downloads and decrypts the whole vault. LastPass offers no way to
@@ -128,11 +133,9 @@ func (c *Client) Vault(ctx context.Context) (*Vault, error) {
 		"b64":        {"1"},
 		"hasplugin":  {"1.3.3"},
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+endpointVault+"?"+query.Encode(), nil)
-	if err != nil {
-		return nil, err
-	}
-	encoded, err := c.do(req)
+	encoded, err := c.do(ctx, func() (*http.Request, error) {
+		return http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+endpointVault+"?"+query.Encode(), nil)
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -278,28 +281,49 @@ func (c *Client) showWebsite(ctx context.Context, form url.Values) (map[string]s
 }
 
 func (c *Client) post(ctx context.Context, path string, form url.Values) ([]byte, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, strings.NewReader(form.Encode()))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	return c.do(req)
+	return c.do(ctx, func() (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, strings.NewReader(form.Encode()))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		return req, nil
+	})
 }
 
-func (c *Client) do(req *http.Request) ([]byte, error) {
-	res, err := c.http.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("lastpass: %w", err)
+// do sends the request newRequest builds and returns the reply body. A
+// throttled request was not processed: it is sent again, see throttleBackoff.
+func (c *Client) do(ctx context.Context, newRequest func() (*http.Request, error)) ([]byte, error) {
+	for attempt := 1; ; attempt++ {
+		req, err := newRequest()
+		if err != nil {
+			return nil, err
+		}
+		res, err := c.http.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("lastpass: %w", err)
+		}
+		body, err := io.ReadAll(res.Body)
+		res.Body.Close()
+		if err != nil {
+			return nil, fmt.Errorf("lastpass: %w", err)
+		}
+		switch {
+		case res.StatusCode == http.StatusOK:
+			return body, nil
+		case res.StatusCode != http.StatusTooManyRequests || attempt > throttleRetries:
+			return nil, fmt.Errorf("lastpass: %s %s: %s", req.Method, req.URL.Path, res.Status)
+		}
+		wait := time.Duration(attempt) * throttleBackoff
+		if seconds, err := strconv.Atoi(res.Header.Get("Retry-After")); err == nil {
+			wait = time.Duration(seconds) * time.Second
+		}
+		select {
+		case <-time.After(wait):
+		case <-ctx.Done():
+			return nil, fmt.Errorf("lastpass: %s %s: throttled by LastPass: %w", req.Method, req.URL.Path, ctx.Err())
+		}
 	}
-	defer res.Body.Close()
-	if res.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("lastpass: %s %s: %s", req.Method, req.URL.Path, res.Status)
-	}
-	body, err := io.ReadAll(res.Body)
-	if err != nil {
-		return nil, fmt.Errorf("lastpass: %w", err)
-	}
-	return body, nil
 }
 
 // firstElement returns the name and attributes of the first XML element

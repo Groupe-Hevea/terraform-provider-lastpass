@@ -44,19 +44,45 @@ func entry(t *testing.T, v *lastpass.Vault, id string) lastpass.Account {
 	return *account
 }
 
-func TestLoginFollowsTheIterationCountOfTheAccount(t *testing.T) {
+// LastPass throttles logins: one login must cost one login request, with the
+// iteration count of the account asked beforehand rather than guessed.
+func TestLoginAsksTheIterationCountThenLogsInOnce(t *testing.T) {
 	server := lastpasstest.New(t, username, password)
 	login(t, server)
 
+	if got := len(server.Requests("/iterations.php")); got != 1 {
+		t.Errorf("got %d iteration requests, want 1", got)
+	}
 	attempts := server.Requests("/login.php")
-	if len(attempts) != 2 {
-		t.Fatalf("got %d login attempts, want a wrong guess then the hinted count", len(attempts))
+	if len(attempts) != 1 {
+		t.Fatalf("got %d login requests, want 1", len(attempts))
 	}
-	if got := attempts[1].Form.Get("iterations"); got != "5000" {
-		t.Errorf("second attempt used %s iterations, want 5000", got)
+	if got := attempts[0].Form.Get("iterations"); got != "5000" {
+		t.Errorf("login used %s iterations, want the 5000 of the account", got)
 	}
-	if got := attempts[1].Form.Get("username"); got != strings.ToLower(username) {
+	if got := attempts[0].Form.Get("username"); got != strings.ToLower(username) {
 		t.Errorf("username sent as %q, want it lowercased", got)
+	}
+}
+
+// A throttled request was not processed: the client waits as asked and sends
+// it again, for a login as for a write.
+func TestThrottledRequestsAreRetried(t *testing.T) {
+	ctx := context.Background()
+	server := lastpasstest.New(t, username, password)
+
+	server.FailNext("/login.php", lastpasstest.Throttle)
+	client := login(t, server)
+	if got := len(server.Requests("/login.php")); got != 2 {
+		t.Errorf("got %d login requests, want the throttled one and its retry", got)
+	}
+
+	server.FailNext("/show_website.php", lastpasstest.Throttle)
+	if _, err := client.Add(ctx, vault(t, client), lastpass.Account{Name: "entry"}); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	if got := len(server.Accounts()); got != 1 {
+		t.Errorf("%d entries stored after a throttled write, want 1", got)
 	}
 }
 
