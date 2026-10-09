@@ -7,7 +7,7 @@ builds:
   flags:
     - -trimpath
   ldflags:
-    - '-s -w -X main.version={{.Version}} -X main.commit={{.Commit}}'
+    - '-s -w -X main.version={{.Version}}'
   goos:
     - freebsd
     - windows
@@ -16,15 +16,18 @@ builds:
   goarch:
     - amd64
     - arm64
-  ignore:
-    - goos: darwin
-      goarch: 386
   binary: '{{ .ProjectName }}_v{{ .Version }}'
 
 archives:
 - formats: ['zip']
   name_template: '{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}'
+# The registry reads the plugin protocol from the manifest published with the
+# release, and assumes protocol 5 without it: it must be an asset, listed in
+# the signed checksums.
 checksum:
+  extra_files:
+    - glob: 'terraform-registry-manifest.json'
+      name_template: '{{ .ProjectName }}_{{ .Version }}_manifest.json'
   name_template: '{{ .ProjectName }}_{{ .Version }}_SHA256SUMS'
   algorithm: sha256
 signs:
@@ -41,6 +44,9 @@ release:
   github:
     owner: Groupe-Hevea
     name: terraform-provider-lastpass
+  extra_files:
+    - glob: 'terraform-registry-manifest.json'
+      name_template: '{{ .ProjectName }}_{{ .Version }}_manifest.json'
   draft: false
   prerelease: auto
 
